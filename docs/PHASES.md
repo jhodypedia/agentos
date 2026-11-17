@@ -430,8 +430,8 @@ tests.
   agent-scoped vector search leaks nothing.
 
 **Known limitations**
-- The configured provider (`api.xingchiapi.com`) exposes only `gpt-6-astra` and
-  `gpt-6.1-sol` — no embedding model — so the live deployment runs on lexical
+- The provider used for the live checks exposes only chat models and no
+  embedding model — so the live deployment runs on lexical
   retrieval. `memory_embedding_provider`/`memory_embedding_model` are unset by
   default; point them at an embeddings endpoint and the vector path activates
   with no code change. This is why the vector path is covered by stub-embedder
