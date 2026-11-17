@@ -1,0 +1,206 @@
+name: agentos
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agentos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentos}
+      POSTGRES_DB: ${POSTGRES_DB:-agentos}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agentos} -d ${POSTGRES_DB:-agentos}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - noeviction
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agentos}:${POSTGRES_PASSWORD:-agentos}@postgres:5432/${POSTGRES_DB:-agentos}
+      REDIS_URL: redis://redis:6379/0
+      WORKSPACE_ROOT: /data/workspaces
+      SKILLS_ROOT: /data/skills
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-agentos/sandbox:latest}
+      # The API talks to a Docker socket only if the operator mounts one. Without
+      # it, commands run on the host process with a scrubbed environment, so the
+      # fallback is stated rather than silent (see docs/SECURITY.md).
+      SANDBOX_ALLOW_HOST_EXECUTION: ${SANDBOX_ALLOW_HOST_EXECUTION:-true}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - agent_workspaces:/data/workspaces
+      - agent_skills:/data/skills
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agentos}:${POSTGRES_PASSWORD:-agentos}@postgres:5432/${POSTGRES_DB:-agentos}
+      REDIS_URL: redis://redis:6379/0
+      WORKSPACE_ROOT: /data/workspaces
+      SKILLS_ROOT: /data/skills
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-agentos/sandbox:latest}
+      SANDBOX_ALLOW_HOST_EXECUTION: ${SANDBOX_ALLOW_HOST_EXECUTION:-true}
+      # The API owns migrations; two services racing `alembic upgrade head` on a
+      # fresh volume is how a deployment gets a half-applied schema.
+      AGENTOS_RUN_MIGRATIONS: "false"
+    command: ["agentos", "worker"]
+    volumes:
+      - agent_workspaces:/data/workspaces
+      - agent_skills:/data/skills
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # The image is python:3.12-slim, which ships neither pgrep nor ps. Asking
+      # the interpreter to look at /proc avoids adding a package just for a probe
+      # and, unlike a port check, proves the worker loop is what is alive.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import pathlib, sys
+          target = b"agentos\x00worker"
+          for entry in pathlib.Path("/proc").iterdir():
+              if not entry.name.isdigit():
+                  continue
+              try:
+                  if target in (entry / "cmdline").read_bytes():
+                      sys.exit(0)
+              except OSError:
+                  continue
+          sys.exit(1)
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+
+  bot:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agentos}:${POSTGRES_PASSWORD:-agentos}@postgres:5432/${POSTGRES_DB:-agentos}
+      REDIS_URL: redis://redis:6379/0
+      AGENTOS_RUN_MIGRATIONS: "false"
+    # Idles (logging once) when no TELEGRAM_BOT_TOKEN is set, so the service is
+    # harmless on an install that does not use Telegram and picks up a token
+    # added to .env later without needing a redeploy.
+    command: ["agentos", "bot"]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # The image's healthcheck probes the API port, which this process does not
+      # serve — without an override the container reports "unhealthy" forever.
+      # Check the process instead, the same way the worker does.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import pathlib, sys
+          target = b"agentos\x00bot"
+          for entry in pathlib.Path("/proc").iterdir():
+              if not entry.name.isdigit():
+                  continue
+              try:
+                  if target in (entry / "cmdline").read_bytes():
+                      sys.exit(0)
+              except OSError:
+                  continue
+          sys.exit(1)
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+
+  sandbox:
+    build:
+      context: ./backend/sandbox
+      dockerfile: Dockerfile
+    image: agentos/sandbox:latest
+    profiles:
+      - sandbox
+    command: ["true"]
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Runs in the operator's browser, so it must be the externally reachable
+        # API origin, not the compose service name.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      - api
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  pgdata:
+  redisdata:
+  agent_skills:
+  agent_workspaces:

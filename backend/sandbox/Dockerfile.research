@@ -1,0 +1,8 @@
+# Build the base with `make sandbox-image` first. No registry rules are fetched
+# at scan time: Semgrep accepts only a workspace-local config supplied by admin.
+FROM agentos/sandbox:latest
+USER root
+RUN python3 -m venv /opt/research \
+    && /opt/research/bin/pip install --no-cache-dir semgrep==1.99.0 \
+    && ln -s /opt/research/bin/semgrep /usr/local/bin/semgrep
+USER sandbox

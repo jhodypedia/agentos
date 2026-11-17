@@ -1,0 +1,61 @@
+# Reverse proxy for a single-host deployment, plain HTTP edge.
+#
+# One origin serves everything, so the dashboard can call the API with a
+# relative URL and there is no CORS configuration to get wrong: `/api/*` and
+# `/health/*` go to the API, everything else to the Next.js server.
+#
+# This is the default file: it listens on PUBLIC_HOST:PROXY_PORT without TLS,
+# which is what you want behind an existing load balancer or for a local smoke
+# test. For Let's Encrypt, set TLS_AUTO=1, which selects Caddyfile.tls.
+
+{
+	# The admin API is not needed and is one more listener on the host.
+	admin off
+}
+
+# Internal endpoint the compose healthcheck probes.
+:8081 {
+	respond /healthz "ok" 200
+}
+
+http://{$PUBLIC_HOST:localhost}:{$PROXY_PORT:80} {
+	encode zstd gzip
+
+	# Task events stream over SSE; buffering would stall the dashboard until the
+	# run finished, which defeats the point of a live feed.
+	@stream path /api/v1/dashboard/stream /api/v1/tasks/*/events
+	reverse_proxy @stream api:8000 {
+		flush_interval -1
+	}
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle /health/* {
+		reverse_proxy api:8000
+	}
+
+	# /metrics is deliberately not proxied: it authenticates with a static token
+	# at best, and this proxy is the public edge. Scrape it over the internal
+	# network instead.
+	handle /metrics {
+		respond "Not found" 404
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

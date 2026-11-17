@@ -1,0 +1,69 @@
+# Single-host production deployment.
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d --build
+#
+# What this adds on top of the base file:
+#
+#   * a `proxy` service (Caddy) as the only publicly bound port;
+#   * the API and web ports are unbound from the host, so nothing reaches them
+#     without going through the proxy;
+#   * the dashboard is built with an empty NEXT_PUBLIC_API_URL, which makes it
+#     call the API on its own origin — no CORS, no mixed-content surprises, and
+#     one name to put in a certificate;
+#   * TLS selected with TLS_AUTO=1 (see .env.example): scripts/deploy.sh then
+#     points PROXY_CONFIG at deploy/Caddyfile.tls so Caddy obtains and renews a
+#     Let's Encrypt certificate for PUBLIC_HOST. Both the HTTP (80, needed for
+#     the ACME challenge) and HTTPS (443) ports are bound either way; with the
+#     plain-HTTP config nothing listens on 443.
+#
+# Required env (see .env.example): PUBLIC_HOST, PROXY_PORT, PROXY_TLS_PORT,
+# TLS_AUTO, ACME_EMAIL. Docker Compose cannot substitute an env var into a bind
+# mount path, so the config file is chosen with PROXY_CONFIG:
+#
+#   PROXY_CONFIG=Caddyfile       (default, plain HTTP edge)
+#   PROXY_CONFIG=Caddyfile.tls   (Let's Encrypt)
+
+services:
+  api:
+    # Overrides the base file's mapping: reachable only from the proxy network.
+    ports: !override []
+
+  web:
+    ports: !override []
+    build:
+      args:
+        # Same-origin: the browser talks to the proxy, which routes /api to the
+        # API and everything else here.
+        NEXT_PUBLIC_API_URL: ""
+
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${PROXY_TLS_PORT:-443}:443"
+      - "${PROXY_PORT:-80}:80"
+    volumes:
+      - ./deploy/${PROXY_CONFIG:-Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+      PROXY_PORT: ${PROXY_PORT:-80}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8081/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  caddy_data:
+  caddy_config:

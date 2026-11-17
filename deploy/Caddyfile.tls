@@ -1,0 +1,58 @@
+# Reverse proxy for a single-host deployment, automatic HTTPS.
+#
+# Same routing as Caddyfile, but Caddy obtains and renews a Let's Encrypt
+# certificate for PUBLIC_HOST. Requirements:
+#
+#   * PUBLIC_HOST resolves to this machine's public IP;
+#   * ports 80 and 443 are reachable from the internet (Caddy answers the ACME
+#     HTTP-01 challenge on 80, then redirects to HTTPS);
+#   * PROXY_PORT and PROXY_TLS_PORT are bound to 80 and 443 by the compose file.
+#
+# Selected automatically when TLS_AUTO=1 (see scripts/deploy.sh).
+
+{
+	admin off
+	email {$ACME_EMAIL:}
+}
+
+:8081 {
+	respond /healthz "ok" 200
+}
+
+{$PUBLIC_HOST:localhost} {
+	encode zstd gzip
+
+	@stream path /api/v1/dashboard/stream /api/v1/tasks/*/events
+	reverse_proxy @stream api:8000 {
+		flush_interval -1
+	}
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle /health/* {
+		reverse_proxy api:8000
+	}
+
+	handle /metrics {
+		respond "Not found" 404
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
