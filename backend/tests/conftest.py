@@ -39,10 +39,14 @@ os.environ["LOG_LEVEL"] = "WARNING"
 os.environ["LOG_FORMAT"] = "console"
 os.environ["BOOTSTRAP_ADMIN_EMAIL"] = ""
 os.environ["BOOTSTRAP_ADMIN_PASSWORD"] = ""
-# Skills are installed into a writable throwaway root so tests never touch
-# /data and cannot interfere with each other.
+# Skills and workspaces live under writable throwaway roots so tests never touch
+# /data, cannot interfere with each other, and do not depend on a developer's
+# .env: without this the default WORKSPACE_ROOT (/data/workspaces) fails with a
+# permission error on a machine that does not have it, which is every CI runner.
 TEST_SKILLS_ROOT = Path(tempfile.mkdtemp(prefix="agentos-skills-"))
 os.environ["SKILLS_ROOT"] = str(TEST_SKILLS_ROOT)
+TEST_WORKSPACE_ROOT = Path(tempfile.mkdtemp(prefix="agentos-workspaces-"))
+os.environ["WORKSPACE_ROOT"] = str(TEST_WORKSPACE_ROOT)
 
 
 def _url_parts() -> tuple[str, int, str, str, str]:
@@ -145,6 +149,7 @@ def prepare_database() -> Iterator[None]:
         raise RuntimeError(f"alembic upgrade failed:\n{result.stdout}\n{result.stderr}")
     yield None
     shutil.rmtree(TEST_SKILLS_ROOT, ignore_errors=True)
+    shutil.rmtree(TEST_WORKSPACE_ROOT, ignore_errors=True)
 
 
 async def _truncate_all() -> None:
